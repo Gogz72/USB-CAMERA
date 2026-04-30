@@ -629,7 +629,99 @@ class UsbCamera:
     # ------------------------------------------------------------
     # Image operations
     # ------------------------------------------------------------
-    def capture_image(self, save_path: Optional[str] = None, convert_rgb: bool = True) -> str:
+    @staticmethod
+    def _build_overlay(
+        top_left: Optional[str] = None,
+        top_right: Optional[str] = None,
+        bottom_left: Optional[str] = None,
+        bottom_right: Optional[str] = None,
+        red: int = 255,
+        green: int = 255,
+        blue: int = 255,
+        font_size: int = 24,
+    ) -> dict:
+        def clamp_color(value):
+            try:
+                return max(0, min(255, int(value)))
+            except Exception:
+                return 255
+
+        try:
+            font_size = max(8, int(font_size))
+        except Exception:
+            font_size = 24
+
+        return {
+            "top_left": "" if top_left is None else str(top_left),
+            "top_right": "" if top_right is None else str(top_right),
+            "bottom_left": "" if bottom_left is None else str(bottom_left),
+            "bottom_right": "" if bottom_right is None else str(bottom_right),
+            "color_bgr": (clamp_color(blue), clamp_color(green), clamp_color(red)),
+            "font_size": font_size,
+        }
+
+    @classmethod
+    def _apply_overlay(cls, frame, overlay: Optional[dict]):
+        if not overlay:
+            return frame
+
+        texts = {
+            "top_left": overlay.get("top_left", ""),
+            "top_right": overlay.get("top_right", ""),
+            "bottom_left": overlay.get("bottom_left", ""),
+            "bottom_right": overlay.get("bottom_right", ""),
+        }
+        if not any(texts.values()):
+            return frame
+
+        h, w = frame.shape[:2]
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_size = max(8, int(overlay.get("font_size", 24)))
+        scale = font_size / 32.0
+        thickness = max(1, int(round(font_size / 18.0)))
+        margin = max(8, int(round(font_size * 0.5)))
+        line_type = cv2.LINE_AA
+        color = overlay.get("color_bgr", (255, 255, 255))
+        shadow = (0, 0, 0)
+
+        for corner, text in texts.items():
+            if not text:
+                continue
+
+            text = str(text)
+            (text_w, text_h), baseline = cv2.getTextSize(text, font, scale, thickness)
+
+            if corner == "top_left":
+                x = margin
+                y = margin + text_h
+            elif corner == "top_right":
+                x = max(margin, w - text_w - margin)
+                y = margin + text_h
+            elif corner == "bottom_left":
+                x = margin
+                y = max(text_h + margin, h - margin - baseline)
+            else:
+                x = max(margin, w - text_w - margin)
+                y = max(text_h + margin, h - margin - baseline)
+
+            cv2.putText(frame, text, (x + 1, y + 1), font, scale, shadow, thickness + 1, line_type)
+            cv2.putText(frame, text, (x, y), font, scale, color, thickness, line_type)
+
+        return frame
+
+    def capture_image(
+        self,
+        save_path: Optional[str] = None,
+        convert_rgb: bool = True,
+        top_left: Optional[str] = None,
+        top_right: Optional[str] = None,
+        bottom_left: Optional[str] = None,
+        bottom_right: Optional[str] = None,
+        red: int = 255,
+        green: int = 255,
+        blue: int = 255,
+        font_size: int = 24,
+    ) -> str:
         """
         Save the latest captured frame to disk and return the file path.
         If save_path is a directory, it will automatically append a filename.
@@ -638,6 +730,9 @@ class UsbCamera:
             if self._last_frame is None:
                 raise RuntimeError("No frame available to capture (camera not started or no frame yet).")
             frame = self._last_frame.copy()
+
+        overlay = self._build_overlay(top_left, top_right, bottom_left, bottom_right, red, green, blue, font_size)
+        frame = self._apply_overlay(frame, overlay)
 
         if convert_rgb:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -679,6 +774,14 @@ class UsbCamera:
         duration: Optional[float] = None,
         fps: Optional[float] = None,
         codec: str = "mp4v",
+        top_left: Optional[str] = None,
+        top_right: Optional[str] = None,
+        bottom_left: Optional[str] = None,
+        bottom_right: Optional[str] = None,
+        red: int = 255,
+        green: int = 255,
+        blue: int = 255,
+        font_size: int = 24,
     ):
         """
         Record video from live frames for given duration (seconds)
@@ -713,6 +816,7 @@ class UsbCamera:
 
         fps = fps or cap_fps or 20.0
         frame_interval = 1.0 / fps
+        overlay = self._build_overlay(top_left, top_right, bottom_left, bottom_right, red, green, blue, font_size)
 
         fourcc = cv2.VideoWriter_fourcc(*codec)
         out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
@@ -734,6 +838,7 @@ class UsbCamera:
                     frame = self._last_frame.copy() if self._last_frame is not None else None
 
                 if frame is not None:
+                    frame = self._apply_overlay(frame, overlay)
                     out.write(frame)
 
                 next_frame_time += frame_interval
@@ -754,8 +859,22 @@ class UsbCamera:
         self._record_stop.set()
 
     # ------------------------------------------------------------
-    def stream_frames(self, width: int = 1280, height: int = 720, fps: float = 30):
+    def stream_frames(
+        self,
+        width: int = 1280,
+        height: int = 720,
+        fps: float = 30,
+        top_left: Optional[str] = None,
+        top_right: Optional[str] = None,
+        bottom_left: Optional[str] = None,
+        bottom_right: Optional[str] = None,
+        red: int = 255,
+        green: int = 255,
+        blue: int = 255,
+        font_size: int = 24,
+    ):
         """Simple generator that streams frames for FastAPI StreamingResponse."""
+        overlay = self._build_overlay(top_left, top_right, bottom_left, bottom_right, red, green, blue, font_size)
         if self.is_capturing():
             try:
                 start = time.time()
@@ -771,6 +890,7 @@ class UsbCamera:
                     if frame is None:
                         time.sleep(0.05)
                         continue
+                    frame = self._apply_overlay(frame, overlay)
                     ok, jpeg = cv2.imencode(".jpg", frame)
                     if ok:
                         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
@@ -821,6 +941,7 @@ class UsbCamera:
                 if not ret or frame is None:
                     time.sleep(0.05)
                     continue
+                frame = self._apply_overlay(frame, overlay)
                 ok, jpeg = cv2.imencode(".jpg", frame)
                 if not ok:
                     continue

@@ -630,6 +630,84 @@ class UsbCamera:
     # Image operations
     # ------------------------------------------------------------
     @staticmethod
+    def _clean_file_stem(file_name: Optional[str]) -> Optional[str]:
+        if file_name is None:
+            return None
+
+        stem = Path(str(file_name).strip()).stem
+        cleaned = "".join(char if char not in '<>:"/\\|?*' and ord(char) >= 32 else "_" for char in stem)
+        cleaned = cleaned.strip(" ._")
+        return cleaned or None
+
+    @classmethod
+    def _make_media_filename(cls, camera_index, extension: str, file_name: Optional[str] = None) -> str:
+        extension = extension if extension.startswith(".") else f".{extension}"
+        clean_name = cls._clean_file_stem(file_name)
+        if clean_name:
+            return f"{clean_name}{extension}"
+        return f"usb_{camera_index}_{time.strftime('%Y%m%d_%H%M%S')}{extension}"
+
+    @classmethod
+    def _resolve_media_path(
+        cls,
+        base_path: str,
+        requested_path: Optional[str],
+        camera_index,
+        extension: str,
+        file_name: Optional[str] = None,
+        append_timestamp_to_stem: bool = False,
+    ) -> str:
+        extension = extension if extension.startswith(".") else f".{extension}"
+        filename = cls._make_media_filename(camera_index, extension, file_name)
+
+        if not requested_path:
+            return os.path.join(base_path, filename)
+
+        if os.path.isdir(requested_path):
+            return os.path.join(requested_path, filename)
+
+        path = Path(requested_path)
+        if not path.suffix:
+            suffix = f"_{time.strftime('%Y%m%d_%H%M%S')}" if append_timestamp_to_stem and not file_name else ""
+            return f"{requested_path}{suffix}{extension}"
+
+        return str(path)
+
+    def build_image_path(self, save_path: Optional[str] = None, file_name: Optional[str] = None) -> str:
+        return self._resolve_media_path(self.image_save_path, save_path, self.camera_index, ".jpg", file_name)
+
+    def build_video_path(self, output_path: Optional[str] = None, file_name: Optional[str] = None) -> str:
+        return self._resolve_media_path(
+            self.video_save_path,
+            output_path,
+            self.camera_index,
+            ".mp4",
+            file_name,
+            append_timestamp_to_stem=True,
+        )
+
+    @staticmethod
+    def _resolve_overlay_text(text: Any) -> str:
+        if text is None:
+            return ""
+
+        value = str(text)
+        if "/" not in value:
+            return value
+
+        now = time.localtime()
+        replacements = {
+            "/date-time": time.strftime("%Y-%m-%d %H:%M:%S", now),
+            "/datetime": time.strftime("%Y-%m-%d %H:%M:%S", now),
+            "/date_time": time.strftime("%Y-%m-%d %H:%M:%S", now),
+            "/date": time.strftime("%Y-%m-%d", now),
+            "/time": time.strftime("%H:%M:%S", now),
+        }
+        for token, replacement in replacements.items():
+            value = value.replace(token, replacement)
+        return value
+
+    @staticmethod
     def _build_overlay(
         top_left: Optional[str] = None,
         top_right: Optional[str] = None,
@@ -666,10 +744,10 @@ class UsbCamera:
             return frame
 
         texts = {
-            "top_left": overlay.get("top_left", ""),
-            "top_right": overlay.get("top_right", ""),
-            "bottom_left": overlay.get("bottom_left", ""),
-            "bottom_right": overlay.get("bottom_right", ""),
+            "top_left": cls._resolve_overlay_text(overlay.get("top_left", "")),
+            "top_right": cls._resolve_overlay_text(overlay.get("top_right", "")),
+            "bottom_left": cls._resolve_overlay_text(overlay.get("bottom_left", "")),
+            "bottom_right": cls._resolve_overlay_text(overlay.get("bottom_right", "")),
         }
         if not any(texts.values()):
             return frame
@@ -721,6 +799,7 @@ class UsbCamera:
         green: int = 255,
         blue: int = 255,
         font_size: int = 24,
+        file_name: Optional[str] = None,
     ) -> str:
         """
         Save the latest captured frame to disk and return the file path.
@@ -738,13 +817,7 @@ class UsbCamera:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(frame)
 
-        if not save_path:
-            save_path = os.path.join(self.image_save_path, f"usb_{self.camera_index}_{self._timestamp()}.jpg")
-        elif os.path.isdir(save_path):
-            filename = f"usb_{self.camera_index}_{self._timestamp()}.jpg"
-            save_path = os.path.join(save_path, filename)
-        elif not Path(save_path).suffix:
-            save_path = f"{save_path}.jpg"
+        save_path = self.build_image_path(save_path, file_name=file_name)
 
         img.save(save_path, quality=90)
         self._last_image_path = save_path
@@ -782,6 +855,7 @@ class UsbCamera:
         green: int = 255,
         blue: int = 255,
         font_size: int = 24,
+        file_name: Optional[str] = None,
     ):
         """
         Record video from live frames for given duration (seconds)
@@ -795,15 +869,7 @@ class UsbCamera:
             raise RuntimeError("No frame available for recording yet.")
 
         self._record_stop.clear()
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-
-        if output_path is None:
-            output_path = os.path.join(self.video_save_path, f"usb_{self.camera_index}_{timestamp}.mp4")
-        else:
-            if os.path.isdir(output_path):
-                output_path = os.path.join(output_path, f"usb_{self.camera_index}_{timestamp}.mp4")
-            elif not Path(output_path).suffix:
-                output_path = f"{output_path}_{timestamp}.mp4"
+        output_path = self.build_video_path(output_path, file_name=file_name)
 
         with self._capture_lock:
             if self._cap and self._cap.isOpened():
@@ -1038,4 +1104,3 @@ class UsbCamera:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
-
